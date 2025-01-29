@@ -246,16 +246,17 @@ if ($Env:flavor -ne 'DevOps') {
 
     # Copy installation script to nested Windows VMs
     Write-Output 'Transferring installation script to nested Windows VMs...'
-    Copy-VMFile $SQLvmName -SourcePath "$agentScript\installArcAgent.ps1" -DestinationPath "$Env:ArcBoxDir\installArcAgent.ps1" -CreateFullPath -FileSource Host -Force
+    #Copy-VMFile $SQLvmName -SourcePath "$agentScript\installArcAgent.ps1" -DestinationPath "$Env:ArcBoxDir\installArcAgent.ps1" -CreateFullPath -FileSource Host -Force
 
     Write-Header 'Onboarding Arc-enabled servers'
 
     # Onboarding the nested VMs as Azure Arc-enabled servers
     Write-Output 'Onboarding the nested Windows VMs as Azure Arc-enabled servers'
-    $accessToken = ConvertFrom-SecureString ((Get-AzAccessToken -AsSecureString).Token) -AsPlainText
-    Invoke-Command -VMName $SQLvmName -ScriptBlock { powershell -File $Using:nestedVMArcBoxDir\installArcAgent.ps1 -accessToken $using:accessToken, -tenantId $Using:tenantId, -subscriptionId $Using:subscriptionId, -resourceGroup $Using:resourceGroup, -azureLocation $Using:azureLocation } -Credential $winCreds
+    #$accessToken = ConvertFrom-SecureString ((Get-AzAccessToken -AsSecureString).Token) -AsPlainText
+    #Invoke-Command -VMName $SQLvmName -ScriptBlock { powershell -File $Using:nestedVMArcBoxDir\installArcAgent.ps1 -accessToken $using:accessToken, -tenantId $Using:tenantId, -subscriptionId $Using:subscriptionId, -resourceGroup $Using:resourceGroup, -azureLocation $Using:azureLocation } -Credential $winCreds
 
     # Wait for the Arc-enabled server installation to be completed
+    <#
     $retryCount = 0
     do {
         $ArcServer = Get-AzConnectedMachine -Name $SQLvmName -ResourceGroupName $resourceGroup
@@ -274,16 +275,17 @@ if ($Env:flavor -ne 'DevOps') {
             }
         }
     } while ($retryCount -le 5)
+    #>
 
     # Create SQL server extension as policy to auto deployment is disabled
     Write-Host "Installing SQL Server extension on the Arc-enabled Server.`n"
-    az connectedmachine extension create --machine-name $SQLvmName --name 'WindowsAgent.SqlServer' --resource-group $resourceGroup --type 'WindowsAgent.SqlServer' --publisher 'Microsoft.AzureData' --settings '{\"LicenseType\":\"Paid\", \"SqlManagement\": {\"IsEnabled\":true}}' --tags $resourceTags --location $azureLocation --only-show-errors --no-wait
+    #az connectedmachine extension create --machine-name $SQLvmName --name 'WindowsAgent.SqlServer' --resource-group $resourceGroup --type 'WindowsAgent.SqlServer' --publisher 'Microsoft.AzureData' --settings '{\"LicenseType\":\"Paid\", \"SqlManagement\": {\"IsEnabled\":true}}' --tags $resourceTags --location $azureLocation --only-show-errors --no-wait
     Write-Host 'SQL Server extension installation on the Arc-enabled Server successful.'
 
-    $retryCount = 0
+    $retryCount = 10
     do {
         # Verify if Arc-enabled server and SQL server extensions are installed
-        $sqlExtension = Get-AzConnectedMachine -Name $SQLvmName -ResourceGroupName $resourceGroup | Select-Object -ExpandProperty Resource | Where-Object { $PSItem.Name -eq 'WindowsAgent.SqlServer' }
+        #$sqlExtension = Get-AzConnectedMachine -Name $SQLvmName -ResourceGroupName $resourceGroup | Select-Object -ExpandProperty Resource | Where-Object { $PSItem.Name -eq 'WindowsAgent.SqlServer' }
         if ($sqlExtension -and ($sqlExtension.ProvisioningState -eq 'Succeeded')) {
             # SQL server extension is installed and ready to run SQL BPA
             Write-Host "SQL server extension is installed and ready to run SQL BPA.`n"
@@ -302,9 +304,9 @@ if ($Env:flavor -ne 'DevOps') {
 
     # Azure Monitor Agent extension is deployed automatically using Azure Policy. Wait until extension status is Succeded.
     Write-Host "Installing Azure Monitoring Agent extension.`n"
-    az connectedmachine extension create --machine-name $SQLvmName --name AzureMonitorWindowsAgent --publisher Microsoft.Azure.Monitor --type AzureMonitorWindowsAgent --resource-group $resourceGroup --location $azureLocation --only-show-errors --no-wait
+    # az connectedmachine extension create --machine-name $SQLvmName --name AzureMonitorWindowsAgent --publisher Microsoft.Azure.Monitor --type AzureMonitorWindowsAgent --resource-group $resourceGroup --location $azureLocation --only-show-errors --no-wait
 
-    $retryCount = 0
+    $retryCount = 10
     do {
         $amaExtension = Get-AzConnectedMachine -Name $SQLvmName -ResourceGroupName $resourceGroup | Select-Object -ExpandProperty Resource | Where-Object { $PSItem.Name -eq 'AzureMonitorWindowsAgent' }
         if ($amaExtension.StatusCode -eq 0) {
@@ -323,98 +325,10 @@ if ($Env:flavor -ne 'DevOps') {
     } while ($retryCount -le 10)
 
     # Get access token to make ARM REST API call for SQL server BPA and migration assessments
-    $token = (az account get-access-token --subscription $subscriptionId --query accessToken --output tsv)
-    $headers = @{'Authorization' = "Bearer $token"; 'Content-Type' = 'application/json' }
+    #$token = (az account get-access-token --subscription $subscriptionId --query accessToken --output tsv)
+    #$headers = @{'Authorization' = "Bearer $token"; 'Content-Type' = 'application/json' }
 
-    # Enable Best practices assessment
-    if ($amaExtension.StatusCode -eq 0) {
 
-        # Create custom log analytics table for SQL assessment
-        Write-Host "Creating Log Analytis workspace table for SQL best practices assessment.`n"
-        az monitor log-analytics workspace table create --resource-group $resourceGroup --workspace-name $Env:workspaceName -n SqlAssessment_CL --columns RawData=string TimeGenerated=datetime --only-show-errors
-
-        # Verify if ArcBox SQL resource is created
-        Write-Host "Enabling SQL server best practices assessment.`n"
-        $bpaDeploymentTemplateUrl = "$Env:templateBaseUrl/artifacts/sqlbpa.json"
-        az deployment group create --resource-group $resourceGroup --template-uri $bpaDeploymentTemplateUrl --parameters workspaceName=$Env:workspaceName vmName=$SQLvmName arcSubscriptionId=$subscriptionId
-
-        # Run Best practices assessment
-        Write-Host "Execute SQL server best practices assessment.`n"
-
-        # Wait for a minute to finish everyting and run assessment
-        Start-Sleep(60)
-
-        $armRestApiEndpoint = "https://management.azure.com/subscriptions/$subscriptionId/resourcegroups/$resourceGroup/providers/Microsoft.HybridCompute/machines/$SQLvmName/extensions/WindowsAgent.SqlServer?api-version=2019-08-02-preview"
-
-        # Build API request payload
-        $worspaceResourceId = "/subscriptions/$subscriptionId/resourcegroups/$resourceGroup/providers/microsoft.operationalinsights/workspaces/$Env:workspaceName".ToLower()
-        $sqlExtensionId = "/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.HybridCompute/machines/$SQLvmName/extensions/WindowsAgent.SqlServer"
-        $sqlbpaPayloadTemplate = "$Env:templateBaseUrl/artifacts/sqlbpa.payload.json"
-        $settingsSaveTime = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
-        $apiPayload = (Invoke-WebRequest -Uri $sqlbpaPayloadTemplate).Content -replace '{{RESOURCEID}}', $sqlExtensionId -replace '{{LOCATION}}', $azureLocation -replace '{{WORKSPACEID}}', $worspaceResourceId -replace '{{SAVETIME}}', $settingsSaveTime
-
-        # Call REST API to run best practices assessment
-        $httpResp = Invoke-WebRequest -Method Patch -Uri $armRestApiEndpoint -Body $apiPayload -Headers $headers
-        if (($httpResp.StatusCode -eq 200) -or ($httpResp.StatusCode -eq 202)) {
-            Write-Host 'Arc-enabled SQL server best practices assessment executed. Wait for assessment to complete to view results.'
-        } else {
-            <# Action when all if and elseif conditions are false #>
-            Write-Host 'SQL Best Practices Assessment faild. Please refer troubleshooting guide to run manually.'
-        }
-    } # End of SQL BPA
-
-    # Run SQL Server Azure Migration Assessment
-    Write-Host "Enabling SQL Server Azure Migration Assessment.`n"
-    $migrationApiURL = 'https://management.azure.com/batch?api-version=2020-06-01'
-    $assessmentName = (New-Guid).Guid
-    $payLoad = @"
-{"requests":[{"httpMethod":"POST","name":"$assessmentName","requestHeaderDetails":{"commandName":"Microsoft_Azure_HybridData_Platform."},"url":"https://management.azure.com/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.AzureArcData/SqlServerInstances/$SQLvmName/runMigrationAssessment?api-version=2024-05-01-preview"}]}
-"@
-
-    $httpResp = Invoke-WebRequest -Method Post -Uri $migrationApiURL -Body $payLoad -Headers $headers
-    if (($httpResp.StatusCode -eq 200) -or ($httpResp.StatusCode -eq 202)) {
-        Write-Host 'Arc-enabled SQL server migration assessment executed. Wait for assessment to complete to view results.'
-    } else {
-        <# Action when all if and elseif conditions are false #>
-        Write-Host 'SQL Server Migration Assessment faild. Please refer troubleshooting guide to run manually.'
-    }
-
-    #Install SQLAdvancedThreatProtection solution
-    Write-Host "Installing SQLAdvancedThreatProtection Log Analytics solution.`n"
-    az monitor log-analytics solution create --resource-group $resourceGroup --solution-type SQLAdvancedThreatProtection --workspace $Env:workspaceName --only-show-errors
-
-    #Install SQLVulnerabilityAssessment solution
-    Write-Host "Install SQLVulnerabilityAssessment Log Analytics solution.`n"
-    az monitor log-analytics solution create --resource-group $resourceGroup --solution-type SQLVulnerabilityAssessment --workspace $Env:workspaceName --only-show-errors
-
-    # Update Azure Monitor data collection rule template with Log Analytics workspace resource ID
-    $sqlDefenderDcrFile = "$Env:ArcBoxDir\defendersqldcrtemplate.json"
-    (Get-Content -Path $sqlDefenderDcrFile) -replace '{LOGANLYTICS_WORKSPACEID}', $workspaceResourceID | Set-Content -Path $sqlDefenderDcrFile
-
-    # Create data collection rules for Defender for SQL
-    Write-Host "Creating Azure Monitor data collection rule.`n"
-    $dcrName = 'Jumpstart-DefenderForSQL-DCR'
-    az monitor data-collection rule create --resource-group $resourceGroup --location $env:azureLocation --name $dcrName --rule-file $sqlDefenderDcrFile
-
-    # Associate DCR with Azure Arc-enabled Server resource
-    Write-Host "Creating Azure Monitor data collection rule assocation for Arc-enabled server.`n"
-    $dcrRuleId = "/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.Insights/dataCollectionRules/$dcrName"
-    az monitor data-collection rule association create --name "$SQLvmName" --rule-id $dcrRuleId --resource $azConnectedMachineId
-
-    # Test Defender for SQL
-    Write-Header "Simulating SQL threats to generate alerts from Defender for Cloud.`n"
-    $remoteScriptFileFile = "$Env:ArcBoxDir\testDefenderForSQL.ps1"
-    Copy-VMFile $SQLvmName -SourcePath "$Env:ArcBoxDir\SqlAdvancedThreatProtectionShell.psm1" -DestinationPath "$Env:ArcBoxDir\SqlAdvancedThreatProtectionShell.psm1" -CreateFullPath -FileSource Host -Force
-    Copy-VMFile $SQLvmName -SourcePath "$Env:ArcBoxDir\testDefenderForSQL.ps1" -DestinationPath $remoteScriptFileFile -CreateFullPath -FileSource Host -Force
-    Invoke-Command -VMName $SQLvmName -ScriptBlock { powershell -File $Using:remoteScriptFileFile } -Credential $winCreds
-
-    # Enable least privileged access
-    Write-Host "Enabling Arc-enabled SQL server least privileged access.`n"
-    az sql server-arc extension feature-flag set --name LeastPrivilege --enable true --resource-group $resourceGroup --machine-name $SQLvmName
-
-    # Enable automated backups
-    Write-Host "Enabling Arc-enabled SQL server automated backups.`n"
-    az sql server-arc backups-policy set --name $SQLvmName --resource-group $resourceGroup --retention-days 31 --full-backup-days 7 --diff-backup-hours 12 --tlog-backup-mins 5
 
     # Onboard nested Windows and Linux VMs to Azure Arc
     if ($Env:flavor -eq 'ITPro') {
@@ -578,17 +492,17 @@ if ($Env:flavor -ne 'DevOps') {
 
         # Copy installation script to nested Windows VMs
         Write-Output 'Transferring installation script to nested Windows VMs...'
-        Copy-VMFile $Win2k22vmName -SourcePath "$agentScript\installArcAgent.ps1" -DestinationPath "$Env:ArcBoxDir\installArcAgent.ps1" -CreateFullPath -FileSource Host -Force
-        Copy-VMFile $Win2k25vmName -SourcePath "$agentScript\installArcAgent.ps1" -DestinationPath "$Env:ArcBoxDir\installArcAgent.ps1" -CreateFullPath -FileSource Host -Force
+        #Copy-VMFile $Win2k22vmName -SourcePath "$agentScript\installArcAgent.ps1" -DestinationPath "$Env:ArcBoxDir\installArcAgent.ps1" -CreateFullPath -FileSource Host -Force
+        #Copy-VMFile $Win2k25vmName -SourcePath "$agentScript\installArcAgent.ps1" -DestinationPath "$Env:ArcBoxDir\installArcAgent.ps1" -CreateFullPath -FileSource Host -Force
 
         # Update Linux VM onboarding script connect to Azure Arc, get new token as it might have been expired by the time execution reached this line.
-        $accessToken = ConvertFrom-SecureString ((Get-AzAccessToken -AsSecureString).Token) -AsPlainText
-        (Get-Content -Path "$agentScript\installArcAgentUbuntu.sh" -Raw) -replace '\$accessToken', "'$accessToken'" -replace '\$resourceGroup', "'$resourceGroup'" -replace '\$tenantId', "'$Env:tenantId'" -replace '\$azureLocation', "'$Env:azureLocation'" -replace '\$subscriptionId', "'$subscriptionId'" | Set-Content -Path "$agentScript\installArcAgentModifiedUbuntu.sh"
+        #$accessToken = ConvertFrom-SecureString ((Get-AzAccessToken -AsSecureString).Token) -AsPlainText
+        #(Get-Content -Path "$agentScript\installArcAgentUbuntu.sh" -Raw) -replace '\$accessToken', "'$accessToken'" -replace '\$resourceGroup', "'$resourceGroup'" -replace '\$tenantId', "'$Env:tenantId'" -replace '\$azureLocation', "'$Env:azureLocation'" -replace '\$subscriptionId', "'$subscriptionId'" | Set-Content -Path "$agentScript\installArcAgentModifiedUbuntu.sh"
 
         # Copy installation script to nested Linux VMs
         Write-Output 'Transferring installation script to nested Linux VMs...'
 
-        Get-VM *Ubuntu* | Copy-VMFile -SourcePath "$agentScript\installArcAgentModifiedUbuntu.sh" -DestinationPath "/home/$nestedLinuxUsername" -FileSource Host -Force
+        #Get-VM *Ubuntu* | Copy-VMFile -SourcePath "$agentScript\installArcAgentModifiedUbuntu.sh" -DestinationPath "/home/$nestedLinuxUsername" -FileSource Host -Force
 
         Write-Output 'Activating operating system on Windows VMs...'
 
@@ -614,12 +528,12 @@ if ($Env:flavor -ne 'DevOps') {
 
         # Onboarding the nested VMs as Azure Arc-enabled servers
         Write-Output 'Onboarding the nested Windows VMs as Azure Arc-enabled servers'
-        Invoke-Command -VMName $Win2k22vmName, $Win2k25vmName -ScriptBlock { powershell -File $Using:nestedVMArcBoxDir\installArcAgent.ps1 -accessToken $using:accessToken, -tenantId $Using:tenantId, -subscriptionId $Using:subscriptionId, -resourceGroup $Using:resourceGroup, -azureLocation $Using:azureLocation } -Credential $winCreds
+        #Invoke-Command -VMName $Win2k22vmName, $Win2k25vmName -ScriptBlock { powershell -File $Using:nestedVMArcBoxDir\installArcAgent.ps1 -accessToken $using:accessToken, -tenantId $Using:tenantId, -subscriptionId $Using:subscriptionId, -resourceGroup $Using:resourceGroup, -azureLocation $Using:azureLocation } -Credential $winCreds
 
         Write-Output 'Onboarding the nested Linux VMs as an Azure Arc-enabled servers'
         $UbuntuSessions = New-PSSession -HostName $Ubuntu01VmIp, $Ubuntu02VmIp -KeyFilePath "$Env:USERPROFILE\.ssh\id_rsa" -UserName $nestedLinuxUsername
-        Invoke-JSSudoCommand -Session $UbuntuSessions -Command "sh /home/$nestedLinuxUsername/installArcAgentModifiedUbuntu.sh"
-
+        #Invoke-JSSudoCommand -Session $UbuntuSessions -Command "sh /home/$nestedLinuxUsername/installArcAgentModifiedUbuntu.sh"
+        <#
         Write-Header 'Enabling SSH access and triggering update assessment for Arc-enabled servers'
         $VMs = @("$namingPrefix-SQL", "$namingPrefix-Ubuntu-01", "$namingPrefix-Ubuntu-02", "$namingPrefix-Win2K22", "$namingPrefix-Win2K25")
         $VMs | ForEach-Object -Parallel {
@@ -644,7 +558,7 @@ if ($Env:flavor -ne 'DevOps') {
 
             Write-Output "Triggering Update Manager assessment on $($connectedMachine.Name)"
             $null = Invoke-AzRestMethod -Method POST -Path "/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.HybridCompute/machines/$($connectedMachine.Name)/assessPatches?api-version=2020-08-15-preview" -Payload '{}'
-
+            #>
         }
     } elseif ($Env:flavor -eq 'DataOps') {
         Write-Header 'Enabling SSH access to Arc-enabled servers'

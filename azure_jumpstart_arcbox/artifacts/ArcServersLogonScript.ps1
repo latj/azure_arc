@@ -308,7 +308,7 @@ if ($Env:flavor -ne 'DevOps') {
 
     $retryCount = 10
     do {
-        $amaExtension = Get-AzConnectedMachine -Name $SQLvmName -ResourceGroupName $resourceGroup | Select-Object -ExpandProperty Resource | Where-Object { $PSItem.Name -eq 'AzureMonitorWindowsAgent' }
+        #$amaExtension = Get-AzConnectedMachine -Name $SQLvmName -ResourceGroupName $resourceGroup | Select-Object -ExpandProperty Resource | Where-Object { $PSItem.Name -eq 'AzureMonitorWindowsAgent' }
         if ($amaExtension.StatusCode -eq 0) {
             Write-Host 'Azure Monitoring Agent extension installation complete.'
             break
@@ -334,6 +334,9 @@ if ($Env:flavor -ne 'DevOps') {
     if ($Env:flavor -eq 'ITPro') {
         Write-Header 'Fetching Nested VMs'
 
+        $Win2k19vmName = "$namingPrefix-Win2K19"
+        $Win2k19vmvhdPath = "${Env:ArcBoxVMDir}\$namingPrefix-Win2K19.vhdx"
+
         $Win2k22vmName = "$namingPrefix-Win2K22"
         $Win2k22vmvhdPath = "${Env:ArcBoxVMDir}\$namingPrefix-Win2K22.vhdx"
 
@@ -346,7 +349,7 @@ if ($Env:flavor -ne 'DevOps') {
         $Ubuntu02vmName = "$namingPrefix-Ubuntu-02"
         $Ubuntu02vmvhdPath = "${Env:ArcBoxVMDir}\$namingPrefix-Ubuntu-02.vhdx"
 
-        $files = 'ArcBox-Win2K22.vhdx;ArcBox-Win2K25.vhdx;ArcBox-Ubuntu-01.vhdx;ArcBox-Ubuntu-02.vhdx;'
+        $files = 'ArcBox-Win2K19.vhdx;ArcBox-Win2K22.vhdx;ArcBox-Win2K25.vhdx;ArcBox-Ubuntu-01.vhdx;ArcBox-Ubuntu-02.vhdx;'
 
         $DeploymentProgressString = 'Downloading and configuring nested VMs'
 
@@ -362,7 +365,7 @@ if ($Env:flavor -ne 'DevOps') {
         $null = Set-AzResource -ResourceName $env:computername -ResourceGroupName $env:resourceGroup -ResourceType 'microsoft.compute/virtualmachines' -Tag $tags -Force
 
         # Verify if VHD files already downloaded especially when re-running this script
-        if (!((Test-Path $Win2K25vmvhdPath) -and (Test-Path $Win2k22vmvhdPath) -and (Test-Path $Ubuntu01vmvhdPath) -and (Test-Path $Ubuntu02vmvhdPath))) {
+        if (!((Test-Path $Win2K25vmvhdPath) -and (Test-Path $Win2k22vmvhdPath) -and (Test-Path $Win2k19vmvhdPath) -and (Test-Path $Ubuntu01vmvhdPath) -and (Test-Path $Ubuntu02vmvhdPath))) {
             <# Action when all if and elseif conditions are false #>
             $Env:AZCOPY_BUFFER_GB = 4
             Write-Output 'Downloading nested VMs VHDX files. This can take some time, hold tight...'
@@ -412,6 +415,7 @@ if ($Env:flavor -ne 'DevOps') {
         # Restarting Windows VM Network Adapters
         Write-Header 'Restarting Network Adapters'
         Start-Sleep -Seconds 5
+        Invoke-Command -VMName $Win2k19vmName -ScriptBlock { Get-NetAdapter | Restart-NetAdapter } -Credential $winCreds
         Invoke-Command -VMName $Win2k22vmName -ScriptBlock { Get-NetAdapter | Restart-NetAdapter } -Credential $winCreds
         Invoke-Command -VMName $Win2k25vmName -ScriptBlock { Get-NetAdapter | Restart-NetAdapter } -Credential $winCreds
         Start-Sleep -Seconds 10
@@ -420,6 +424,14 @@ if ($Env:flavor -ne 'DevOps') {
 
             # Renaming the nested VMs
             Write-Header 'Renaming the nested Windows VMs'
+            Invoke-Command -VMName $Win2k19vmName -ScriptBlock {
+
+                if ($env:computername -cne $using:Win2k19vmName) {
+                    Rename-Computer -NewName $using:Win2k19vmName -Restart
+                }
+
+            } -Credential $winCreds
+
             Invoke-Command -VMName $Win2k22vmName -ScriptBlock {
 
                 if ($env:computername -cne $using:Win2k22vmName) {
@@ -451,15 +463,15 @@ if ($Env:flavor -ne 'DevOps') {
         # Configuring SSH for accessing Linux VMs
         Write-Output 'Generating SSH key for accessing nested Linux VMs'
 
-        $null = New-Item -Path ~ -Name .ssh -ItemType Directory
-        ssh-keygen -t rsa -N '' -f $Env:USERPROFILE\.ssh\id_rsa
+        #$null = New-Item -Path ~ -Name .ssh -ItemType Directory
+        #ssh-keygen -t rsa -N '' -f $Env:USERPROFILE\.ssh\id_rsa
 
-        Copy-Item -Path "$Env:USERPROFILE\.ssh\id_rsa.pub" -Destination "$Env:TEMP\authorized_keys"
+        #Copy-Item -Path "$Env:USERPROFILE\.ssh\id_rsa.pub" -Destination "$Env:TEMP\authorized_keys"
 
         # Automatically accept unseen keys but will refuse connections for changed or invalid hostkeys.
-        Add-Content -Path "$Env:USERPROFILE\.ssh\config" -Value 'StrictHostKeyChecking=accept-new'
+        #Add-Content -Path "$Env:USERPROFILE\.ssh\config" -Value 'StrictHostKeyChecking=accept-new'
 
-        Get-VM *Ubuntu* | Copy-VMFile -SourcePath "$Env:TEMP\authorized_keys" -DestinationPath "/home/$nestedLinuxUsername/.ssh/" -FileSource Host -Force -CreateFullPath
+        #Get-VM *Ubuntu* | Copy-VMFile -SourcePath "$Env:TEMP\authorized_keys" -DestinationPath "/home/$nestedLinuxUsername/.ssh/" -FileSource Host -Force -CreateFullPath
 
         if ($namingPrefix -ne 'ArcBox') {
 
@@ -505,6 +517,15 @@ if ($Env:flavor -ne 'DevOps') {
         #Get-VM *Ubuntu* | Copy-VMFile -SourcePath "$agentScript\installArcAgentModifiedUbuntu.sh" -DestinationPath "/home/$nestedLinuxUsername" -FileSource Host -Force
 
         Write-Output 'Activating operating system on Windows VMs...'
+        
+        Invoke-Command -VMName $Win2k19vmName -ScriptBlock {
+
+            cscript C:\Windows\system32\slmgr.vbs -ipk N69G4-B89J2-4G8F4-WWYCC-J464C
+            cscript C:\Windows\system32\slmgr.vbs -skms kms.core.windows.net
+            cscript C:\Windows\system32\slmgr.vbs -ato
+            cscript C:\Windows\system32\slmgr.vbs -dlv
+
+        } -Credential $winCreds
 
         Invoke-Command -VMName $Win2k22vmName -ScriptBlock {
 
@@ -531,7 +552,7 @@ if ($Env:flavor -ne 'DevOps') {
         #Invoke-Command -VMName $Win2k22vmName, $Win2k25vmName -ScriptBlock { powershell -File $Using:nestedVMArcBoxDir\installArcAgent.ps1 -accessToken $using:accessToken, -tenantId $Using:tenantId, -subscriptionId $Using:subscriptionId, -resourceGroup $Using:resourceGroup, -azureLocation $Using:azureLocation } -Credential $winCreds
 
         Write-Output 'Onboarding the nested Linux VMs as an Azure Arc-enabled servers'
-        $UbuntuSessions = New-PSSession -HostName $Ubuntu01VmIp, $Ubuntu02VmIp -KeyFilePath "$Env:USERPROFILE\.ssh\id_rsa" -UserName $nestedLinuxUsername
+        #$UbuntuSessions = New-PSSession -HostName $Ubuntu01VmIp, $Ubuntu02VmIp -KeyFilePath "$Env:USERPROFILE\.ssh\id_rsa" -UserName $nestedLinuxUsername
         #Invoke-JSSudoCommand -Session $UbuntuSessions -Command "sh /home/$nestedLinuxUsername/installArcAgentModifiedUbuntu.sh"
         <#
         Write-Header 'Enabling SSH access and triggering update assessment for Arc-enabled servers'
@@ -559,7 +580,7 @@ if ($Env:flavor -ne 'DevOps') {
             Write-Output "Triggering Update Manager assessment on $($connectedMachine.Name)"
             $null = Invoke-AzRestMethod -Method POST -Path "/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.HybridCompute/machines/$($connectedMachine.Name)/assessPatches?api-version=2020-08-15-preview" -Payload '{}'
             #>
-        }
+        #}
     } elseif ($Env:flavor -eq 'DataOps') {
         Write-Header 'Enabling SSH access to Arc-enabled servers'
         $null = Connect-AzAccount -Identity -Tenant $tenantId -Subscription $subscriptionId -Scope Process -WarningAction SilentlyContinue
